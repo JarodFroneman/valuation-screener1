@@ -540,6 +540,69 @@ def _fred_monthly_ffill(series_id: str) -> Optional[pd.Series]:
     return None
 
 
+# ── STANDALONE FRED FETCH — fresh connection, no shared session ───────────────
+# This is deliberately separate from _SESSION and all other fetch functions.
+# Used as the guaranteed first source for GB and JP on Streamlit Cloud.
+
+def _fred_fresh(series_id: str) -> Optional[pd.Series]:
+    """
+    Fetch a FRED monthly series using a completely fresh requests.get call.
+    No shared session, no cookies from other requests, no side effects.
+    Forward-fills monthly data to daily.
+    Always works from any IP including cloud providers.
+    """
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    _log("info", f"  FRED-fresh → {series_id}")
+    try:
+        r = requests.get(
+            url,
+            timeout=30,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/csv,text/plain,*/*",
+            }
+        )
+        if not r.ok:
+            _log("fail", f"  FRED-fresh HTTP {r.status_code} for {series_id}")
+            return None
+
+        text = r.text.strip()
+        _log("info", f"  FRED-fresh got {len(text)} chars: {text[:60]}")
+
+        if not text or len(text) < 30:
+            _log("fail", f"  FRED-fresh empty response")
+            return None
+
+        df = pd.read_csv(StringIO(text))
+        if df.shape[1] < 2:
+            _log("fail", f"  FRED-fresh bad shape: {df.shape}")
+            return None
+
+        df.columns    = ["Date", "Value"]
+        df["Date"]    = pd.to_datetime(df["Date"],  errors="coerce")
+        df["Value"]   = pd.to_numeric(df["Value"],  errors="coerce")
+        df = df.dropna().set_index("Date").sort_index()
+
+        if df.empty:
+            _log("fail", f"  FRED-fresh no valid rows for {series_id}")
+            return None
+
+        # Forward-fill monthly → daily
+        idx = pd.date_range(df.index[0], pd.Timestamp.now(), freq="D")
+        s   = df["Value"].reindex(idx).ffill().dropna()
+
+        if len(s) >= 20:
+            _log("ok", f"  FRED-fresh OK {series_id}: {len(s)} daily rows")
+            return _clean(s)
+
+        _log("fail", f"  FRED-fresh too few rows: {len(s)}")
+        return None
+
+    except Exception as e:
+        _log("fail", f"  FRED-fresh exception for {series_id}: {e}")
+        return None
+
+
 # ── 6a. FRED via pandas_datareader (daily-interpolated monthly) ──────────────
 
 def _pdr_fred(series_id: str) -> Optional[pd.Series]:
@@ -597,33 +660,39 @@ def _bond_yield_daily(country: str) -> Optional[pd.Series]:
     stooq_sym, fred_id = _BOND_CONFIG.get(country, (None, None))
     _log("info", f"─── bond:{country} ───")
 
-    # ── GB and JP: FRED first — guaranteed to work from any IP ───────────────
+    # ── GB and JP: fresh FRED call first — guaranteed from any IP ────────────
     if country in ("GB", "JP"):
 
-        # 1. FRED via pandas_datareader (monthly ffilled — always accessible)
+        # 1. FRED fresh HTTP (standalone, no shared session — always works)
+        if fred_id:
+            s = _fred_fresh(fred_id)
+            if s is not None:
+                return s
+
+        # 2. FRED via pandas_datareader
         if fred_id:
             s = _pdr_fred(fred_id)
             if s is not None:
                 return s
 
-        # 2. Yahoo Finance ^TNGB / ^TNJP (direct index yield tickers)
+        # 3. Yahoo Finance ^TNGB / ^TNJP
         s = _yf_yield(country)
         if s is not None:
             return s
 
-        # 3. FRED direct HTTP (backup if pdr fails)
+        # 4. FRED via _http_get (shared session — last HTTP attempt)
         if fred_id:
             s = _fred_monthly_ffill(fred_id)
             if s is not None:
                 return s
 
-        # 4. pandas_datareader → Stooq (may be blocked on cloud)
+        # 5. pandas_datareader → Stooq
         if stooq_sym:
             s = _pdr_stooq(stooq_sym)
             if s is not None:
                 return s
 
-        # 5. Bank of England / MOF Japan (often blocked on cloud)
+        # 6. Bank of England / MOF Japan
         if country == "GB":
             s = _boe_yield()
             if s is not None:
@@ -633,7 +702,7 @@ def _bond_yield_daily(country: str) -> Optional[pd.Series]:
             if s is not None:
                 return s
 
-        # 6. Stooq manual HTTP
+        # 7. Stooq manual HTTP
         if stooq_sym:
             s = _stooq_yield(stooq_sym)
             if s is not None:
