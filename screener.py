@@ -95,7 +95,7 @@ PAIRS = [
     ("USDCHF",            "DX=F",     "6S=F",        "FX"),
     ("USDJPY",            "DX=F",     "6J=F",        "FX"),
     ("USDMXN",            "DX=F",     "6M=F",        "FX"),
-    ("USDZAR",            "DX=F",     "6Z=F",    "FX"),
+    ("USDZAR",            "DX=F",     "USDZAR=X",    "FX"),
     # Commodities vs Gold
     ("GOLD / DX",         "GC=F",     "DX=F",        "Commodities"),
     ("OIL / GOLD",        "CL=F",     "GC=F",        "Commodities"),
@@ -585,19 +585,64 @@ _BOND_CONFIG = {
 @st.cache_data(ttl=3600, show_spinner=False)
 def _bond_yield_daily(country: str) -> Optional[pd.Series]:
     """
-    Fetch 10Y government bond yield. Source priority:
-      1. pandas_datareader → Stooq  (daily, handles cookies)
-      2. Yahoo Finance               (^TNGB / ^TNJP / =RR tickers)
-      3. ECB SDW API                 (DE + FR only — daily)
-      4. Bank of England API         (GB only — daily)
-      5. Ministry of Finance Japan   (JP only — daily)
-      6. Stooq manual HTTP           (daily, cookie warm-up)
-      7. pandas_datareader → FRED    (monthly ffilled — guaranteed fallback)
-      8. FRED direct HTTP            (monthly ffilled — last resort)
+    Fetch 10Y government bond yield.
+
+    Source order is optimised for Streamlit Cloud where many APIs
+    block cloud-provider IPs:
+      - FRED (via pdr) always works from any IP — used first for GB + JP
+      - Yahoo Finance ^TN tickers work reliably from cloud
+      - ECB API works from cloud for DE + FR
+      - BOE / MOF Japan sometimes block cloud IPs — tried but not relied on
     """
     stooq_sym, fred_id = _BOND_CONFIG.get(country, (None, None))
     _log("info", f"─── bond:{country} ───")
 
+    # ── GB and JP: FRED first — guaranteed to work from any IP ───────────────
+    if country in ("GB", "JP"):
+
+        # 1. FRED via pandas_datareader (monthly ffilled — always accessible)
+        if fred_id:
+            s = _pdr_fred(fred_id)
+            if s is not None:
+                return s
+
+        # 2. Yahoo Finance ^TNGB / ^TNJP (direct index yield tickers)
+        s = _yf_yield(country)
+        if s is not None:
+            return s
+
+        # 3. FRED direct HTTP (backup if pdr fails)
+        if fred_id:
+            s = _fred_monthly_ffill(fred_id)
+            if s is not None:
+                return s
+
+        # 4. pandas_datareader → Stooq (may be blocked on cloud)
+        if stooq_sym:
+            s = _pdr_stooq(stooq_sym)
+            if s is not None:
+                return s
+
+        # 5. Bank of England / MOF Japan (often blocked on cloud)
+        if country == "GB":
+            s = _boe_yield()
+            if s is not None:
+                return s
+        if country == "JP":
+            s = _boj_yield()
+            if s is not None:
+                return s
+
+        # 6. Stooq manual HTTP
+        if stooq_sym:
+            s = _stooq_yield(stooq_sym)
+            if s is not None:
+                return s
+
+        _log("fail", f"ALL SOURCES FAILED for bond:{country}")
+        return None
+
+    # ── DE and FR: ECB API works well from cloud ──────────────────────────────
     # 1. pandas_datareader → Stooq
     if stooq_sym:
         s = _pdr_stooq(stooq_sym)
@@ -609,37 +654,25 @@ def _bond_yield_daily(country: str) -> Optional[pd.Series]:
     if s is not None:
         return s
 
-    # 3. ECB (DE + FR)
+    # 3. ECB SDW API
     if country in ("DE", "FR"):
         s = _ecb_yield(country)
         if s is not None:
             return s
 
-    # 4. Bank of England (GB)
-    if country == "GB":
-        s = _boe_yield()
-        if s is not None:
-            return s
-
-    # 5. Ministry of Finance Japan (JP)
-    if country == "JP":
-        s = _boj_yield()
-        if s is not None:
-            return s
-
-    # 6. Stooq manual HTTP
+    # 4. Stooq manual HTTP
     if stooq_sym:
         s = _stooq_yield(stooq_sym)
         if s is not None:
             return s
 
-    # 7. pandas_datareader → FRED (monthly ffilled — most reliable last resort)
+    # 5. FRED via pdr
     if fred_id:
         s = _pdr_fred(fred_id)
         if s is not None:
             return s
 
-    # 8. FRED direct HTTP
+    # 6. FRED direct HTTP
     if fred_id:
         s = _fred_monthly_ffill(fred_id)
         if s is not None:
