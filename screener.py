@@ -124,8 +124,8 @@ PAIRS = [
     # Multiple yield tickers tried via _yf_fetch fallback logic
     ("CAC40 / FR10Y",     "^FCHI",    "bond:FR",     "Indices vs Bonds"),
     ("DAX / DE10Y",       "^GDAXI",   "bond:DE",     "Indices vs Bonds"),
-    ("FTSE / UK10Y",      "^FTSE",    "^TNGB",       "Indices vs Bonds"),
-    ("NIKKEI / JP10Y",    "^N225",    "^TNJP",       "Indices vs Bonds"),
+    ("FTSE / UK10Y",      "^FTSE",    "fred:IRLTLT01GBM156N",  "Indices vs Bonds"),
+    ("NIKKEI / JP10Y",    "^N225",    "fred:IRLTLT01JPM156N",  "Indices vs Bonds"),
 ]
 
 GROUPS    = ["All"] + sorted(set(p[3] for p in PAIRS))
@@ -654,20 +654,107 @@ def _pdr_fred(series_id: str) -> Optional[pd.Series]:
     return None
 
 
-# ── Dedicated cached fetchers for GB and JP — bypass all shared state ─────────
-# These are the only functions used for bond:GB and bond:JP.
-# Completely isolated — own requests.get, own cache, no shared session.
+# ── Dedicated self-contained fetchers for UK and JP 10Y yields ────────────────
+# Zero dependency on any other fetch function or shared session.
+# Uses linear interpolation (not ffill) so daily pct_change has real variation.
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _uk10y_daily() -> Optional[pd.Series]:
-    """UK 10Y gilt yield — FRED IRLTLT01GBM156N — fresh isolated fetch."""
-    return _fred_fresh("IRLTLT01GBM156N")
+    """
+    UK 10Y gilt yield — completely self-contained.
+    Tries Yahoo Finance tickers then FRED. Uses linear interpolation to daily.
+    """
+    import requests as _r
+    import yfinance as _yf
+
+    # 1. Try Yahoo Finance tickers directly
+    for tk in ["^TNGB", "GB10YT=RR", "GBGV10YT=RR"]:
+        try:
+            df = _yf.Ticker(tk).history(period="max", auto_adjust=True)
+            if df is not None and not df.empty and "Close" in df.columns:
+                s = df["Close"].dropna()
+                if len(s) >= 100:
+                    if s.index.tz is not None:
+                        s = s.tz_convert("UTC").tz_localize(None)
+                    s.index = s.index.normalize()
+                    s = s[~s.index.duplicated(keep="last")].sort_index()
+                    _log("ok", f"  UK10Y via {tk}: {len(s)} bars")
+                    return s
+        except Exception as e:
+            _log("warn", f"  UK10Y {tk}: {e}")
+
+    # 2. FRED — linear interpolation to daily (better for pct_change than ffill)
+    try:
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=IRLTLT01GBM156N"
+        resp = _r.get(url, timeout=30,
+                      headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
+        if resp.ok and len(resp.text) > 100:
+            df = pd.read_csv(StringIO(resp.text))
+            df.columns = ["Date", "Value"]
+            df["Date"]  = pd.to_datetime(df["Date"],  errors="coerce")
+            df["Value"] = pd.to_numeric(df["Value"],  errors="coerce")
+            df = df.dropna().set_index("Date").sort_index()
+            if not df.empty:
+                # Linear interpolation to daily — gives smooth pct_change
+                idx = pd.date_range(df.index[0], pd.Timestamp.now(), freq="D")
+                s   = df["Value"].reindex(idx).interpolate("linear").dropna()
+                if len(s) >= 100:
+                    _log("ok", f"  UK10Y via FRED: {len(s)} daily rows (interpolated)")
+                    return s
+    except Exception as e:
+        _log("warn", f"  UK10Y FRED: {e}")
+
+    _log("fail", "  UK10Y ALL SOURCES FAILED")
+    return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _jp10y_daily() -> Optional[pd.Series]:
-    """Japan 10Y JGB yield — FRED IRLTLT01JPM156N — fresh isolated fetch."""
-    return _fred_fresh("IRLTLT01JPM156N")
+    """
+    Japan 10Y JGB yield — completely self-contained.
+    Tries Yahoo Finance tickers then FRED. Uses linear interpolation to daily.
+    """
+    import requests as _r
+    import yfinance as _yf
+
+    # 1. Try Yahoo Finance tickers directly
+    for tk in ["^TNJP", "JP10YT=RR", "JPGV10YT=RR"]:
+        try:
+            df = _yf.Ticker(tk).history(period="max", auto_adjust=True)
+            if df is not None and not df.empty and "Close" in df.columns:
+                s = df["Close"].dropna()
+                if len(s) >= 100:
+                    if s.index.tz is not None:
+                        s = s.tz_convert("UTC").tz_localize(None)
+                    s.index = s.index.normalize()
+                    s = s[~s.index.duplicated(keep="last")].sort_index()
+                    _log("ok", f"  JP10Y via {tk}: {len(s)} bars")
+                    return s
+        except Exception as e:
+            _log("warn", f"  JP10Y {tk}: {e}")
+
+    # 2. FRED — linear interpolation to daily
+    try:
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=IRLTLT01JPM156N"
+        resp = _r.get(url, timeout=30,
+                      headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
+        if resp.ok and len(resp.text) > 100:
+            df = pd.read_csv(StringIO(resp.text))
+            df.columns = ["Date", "Value"]
+            df["Date"]  = pd.to_datetime(df["Date"],  errors="coerce")
+            df["Value"] = pd.to_numeric(df["Value"],  errors="coerce")
+            df = df.dropna().set_index("Date").sort_index()
+            if not df.empty:
+                idx = pd.date_range(df.index[0], pd.Timestamp.now(), freq="D")
+                s   = df["Value"].reindex(idx).interpolate("linear").dropna()
+                if len(s) >= 100:
+                    _log("ok", f"  JP10Y via FRED: {len(s)} daily rows (interpolated)")
+                    return s
+    except Exception as e:
+        _log("warn", f"  JP10Y FRED: {e}")
+
+    _log("fail", "  JP10Y ALL SOURCES FAILED")
+    return None
 
 
 # ── Master bond yield dispatcher ──────────────────────────────────────────────
@@ -801,15 +888,61 @@ def _resample(s: pd.Series, rule: str) -> pd.Series:
             return pd.Series(dtype=float)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_fred(series_id: str) -> Optional[pd.Series]:
+    """
+    Standalone FRED fetch. Completely isolated from all other functions.
+    Uses linear interpolation to convert monthly data to daily.
+    FRED is publicly accessible from any IP with no restrictions.
+    """
+    try:
+        import requests as req
+        url  = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        resp = req.get(url, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "Accept":     "text/csv, text/plain, */*",
+        })
+        _log("info", f"  FRED:{series_id} → HTTP {resp.status_code} ({len(resp.text)} chars)")
+        if not resp.ok:
+            _log("fail", f"  FRED:{series_id} bad status {resp.status_code}")
+            return None
+
+        df = pd.read_csv(StringIO(resp.text))
+        df.columns    = ["Date", "Value"]
+        df["Date"]    = pd.to_datetime(df["Date"],  errors="coerce")
+        df["Value"]   = pd.to_numeric(df["Value"],  errors="coerce")
+        df = df.dropna().set_index("Date").sort_index()
+
+        if df.empty:
+            _log("fail", f"  FRED:{series_id} no valid rows")
+            return None
+
+        # Linear interpolation monthly → daily (smooth pct_change)
+        idx = pd.date_range(df.index[0], pd.Timestamp.now(), freq="D")
+        s   = df["Value"].reindex(idx).interpolate("linear").dropna()
+        _log("ok", f"  FRED:{series_id} OK — {len(s)} daily rows, latest={s.iloc[-1]:.4f}")
+        return _clean(s)
+
+    except Exception as e:
+        _log("fail", f"  FRED:{series_id} exception: {e}")
+        return None
+
+
 def get_series(ticker: str, tf: str) -> Optional[pd.Series]:
     """Return price/yield series resampled to the requested timeframe."""
-    rule = TIMEFRAMES[tf]
+    rule  = TIMEFRAMES[tf]
 
-    if ticker == "bond:GB":
-        # Dedicated isolated fetcher — bypasses all shared session state
+    # fred: prefix — direct FRED fetch, completely standalone
+    if ticker.startswith("fred:"):
+        daily = _fetch_fred(ticker[5:])
+
+    elif ticker == "^TNGB":
+        daily = _uk10y_daily()
+    elif ticker == "^TNJP":
+        daily = _jp10y_daily()
+    elif ticker == "bond:GB":
         daily = _uk10y_daily()
     elif ticker == "bond:JP":
-        # Dedicated isolated fetcher — bypasses all shared session state
         daily = _jp10y_daily()
     elif ticker.startswith("bond:"):
         daily = _bond_yield_daily(ticker[5:])
