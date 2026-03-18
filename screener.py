@@ -888,18 +888,15 @@ def _resample(s: pd.Series, rule: str) -> pd.Series:
             return pd.Series(dtype=float)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_fred(series_id: str) -> Optional[pd.Series]:
     """
-    Standalone FRED fetch. Completely isolated from all other functions.
-    Uses linear interpolation to convert monthly data to daily.
-    FRED is publicly accessible from any IP with no restrictions.
+    Standalone FRED fetch. No caching — always runs fresh so the log
+    always shows what happened. FRED is accessible from any IP.
     """
     try:
-        import requests as req
         url  = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-        resp = req.get(url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        resp = requests.get(url, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Accept":     "text/csv, text/plain, */*",
         })
         _log("info", f"  FRED:{series_id} → HTTP {resp.status_code} ({len(resp.text)} chars)")
@@ -908,19 +905,18 @@ def _fetch_fred(series_id: str) -> Optional[pd.Series]:
             return None
 
         df = pd.read_csv(StringIO(resp.text))
-        df.columns    = ["Date", "Value"]
-        df["Date"]    = pd.to_datetime(df["Date"],  errors="coerce")
-        df["Value"]   = pd.to_numeric(df["Value"],  errors="coerce")
+        df.columns = ["Date", "Value"]
+        df["Date"]  = pd.to_datetime(df["Date"],  errors="coerce")
+        df["Value"] = pd.to_numeric(df["Value"],  errors="coerce")
         df = df.dropna().set_index("Date").sort_index()
 
         if df.empty:
             _log("fail", f"  FRED:{series_id} no valid rows")
             return None
 
-        # Linear interpolation monthly → daily (smooth pct_change)
         idx = pd.date_range(df.index[0], pd.Timestamp.now(), freq="D")
         s   = df["Value"].reindex(idx).interpolate("linear").dropna()
-        _log("ok", f"  FRED:{series_id} OK — {len(s)} daily rows, latest={s.iloc[-1]:.4f}")
+        _log("ok", f"  FRED:{series_id} OK — {len(s)} rows, latest={s.iloc[-1]:.4f}")
         return _clean(s)
 
     except Exception as e:
@@ -932,61 +928,8 @@ def get_series(ticker: str, tf: str) -> Optional[pd.Series]:
     """Return price/yield series resampled to the requested timeframe."""
     rule = TIMEFRAMES[tf]
 
-    # fred: prefix — inline FRED call, NO caching so it always executes
-    # and always writes to the fetch log
     if ticker.startswith("fred:"):
-        series_id = ticker[5:]
-        st.session_state.setdefault("fred_cache", {})
-        if series_id in st.session_state["fred_cache"]:
-            daily = st.session_state["fred_cache"][series_id]
-            _log("info", f"  FRED:{series_id} — session cache hit")
-        else:
-            daily = None
-            try:
-                url  = (f"https://fred.stlouisfed.org/graph/"
-                        f"fredgraph.csv?id={series_id}")
-                _log("info", f"  FRED:{series_id} — fetching {url}")
-                resp = requests.get(url, timeout=30, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    "Accept":     "text/csv,text/plain,*/*",
-                })
-                _log("info",
-                     f"  FRED:{series_id} → HTTP {resp.status_code} "
-                     f"({len(resp.text)} chars) "
-                     f"preview: {resp.text[:60]!r}")
-                if resp.ok and len(resp.text) > 50:
-                    df            = pd.read_csv(StringIO(resp.text))
-                    df.columns    = ["Date", "Value"]
-                    df["Date"]    = pd.to_datetime(df["Date"],  errors="coerce")
-                    df["Value"]   = pd.to_numeric(df["Value"],  errors="coerce")
-                    df = df.dropna().set_index("Date").sort_index()
-                    if not df.empty:
-                        idx   = pd.date_range(df.index[0],
-                                              pd.Timestamp.now(), freq="D")
-                        s     = (df["Value"].reindex(idx)
-                                           .interpolate("linear")
-                                           .dropna())
-                        s     = _clean(s)
-                        if s is not None and len(s) >= 20:
-                            _log("ok",
-                                 f"  FRED:{series_id} OK — "
-                                 f"{len(s)} daily rows, "
-                                 f"latest={s.iloc[-1]:.4f}")
-                            daily = s
-                            st.session_state["fred_cache"][series_id] = s
-                        else:
-                            _log("fail",
-                                 f"  FRED:{series_id} too few rows: "
-                                 f"{len(s) if s is not None else 0}")
-                    else:
-                        _log("fail", f"  FRED:{series_id} empty dataframe")
-                else:
-                    _log("fail",
-                         f"  FRED:{series_id} bad response: "
-                         f"status={resp.status_code}")
-            except Exception as e:
-                _log("fail", f"  FRED:{series_id} exception: {e}")
-
+        daily = _fetch_fred(ticker[5:])
     elif ticker == "^TNGB" or ticker == "bond:GB":
         daily = _uk10y_daily()
     elif ticker == "^TNJP" or ticker == "bond:JP":
@@ -1189,7 +1132,6 @@ def main():
         if st.button("↺  Refresh data", use_container_width=True):
             st.cache_data.clear()
             _FETCH_LOG.clear()
-            st.session_state.pop("fred_cache", None)
             st.rerun()
 
         st.caption(f"Updated: {datetime.utcnow().strftime('%H:%M UTC')}")
