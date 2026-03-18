@@ -75,10 +75,10 @@ PAIRS = [
     ("NQ / BONDS","NQ=F","ZB=F","Indices vs Bonds"),
     ("RUSSELL / BONDS","RTY=F","ZB=F","Indices vs Bonds"),
     ("DOW / BONDS","YM=F","ZB=F","Indices vs Bonds"),
-    ("CAC40 / FR10Y","^FCHI","DE10YT=RR","Indices vs Bonds"),
-    ("DAX / DE10Y","^GDAXI","DE10YT=RR","Indices vs Bonds"),
-    ("FTSE / UK10Y","^FTSE","GB10YT=RR","Indices vs Bonds"),
-    ("NIKKEI / JP10Y","^N225","JP10YT=RR","Indices vs Bonds"),
+    ("CAC40 / FR10Y","^FCHI",  "FRED:IRLTLT01FRM156N","Indices vs Bonds"),
+    ("DAX / DE10Y",  "^GDAXI", "FRED:IRLTLT01DEM156N","Indices vs Bonds"),
+    ("FTSE / UK10Y", "^FTSE",  "FRED:IRLTLT01GBM156N","Indices vs Bonds"),
+    ("NIKKEI / JP10Y","^N225", "FRED:IRLTLT01JPM156N","Indices vs Bonds"),
 ]
 
 GROUPS = ["All"] + sorted(set(p[3] for p in PAIRS))
@@ -101,61 +101,51 @@ def clean(s: pd.Series) -> Optional[pd.Series]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch(ticker: str) -> Optional[pd.Series]:
-    # For bond yield tickers that often fail, try multiple formats
-    candidates = [ticker]
-    extras = {
-        "GB10YT=RR": ["GB10YT=RR","^TNGB","GBGV10YT=RR"],
-        "JP10YT=RR": ["JP10YT=RR","^TNJP","JPGV10YT=RR"],
-        "DE10YT=RR": ["DE10YT=RR","^TNDE","DEGV10YT=RR"],
-        "FR10YT=RR": ["FR10YT=RR","^TNFR","FRGV10YT=RR"],
-    }
-    if ticker in extras:
-        candidates = extras[ticker]
+    """Fetch daily price/yield series. FRED: prefix goes straight to FRED."""
 
-    for tk in candidates:
+    # ── FRED: prefix — skip Yahoo entirely, go straight to FRED ──────────────
+    if ticker.startswith("FRED:"):
+        series_id = ticker[5:]
         try:
-            df = yf.Ticker(tk).history(period="max", auto_adjust=True)
-            if df is not None and not df.empty and "Close" in df.columns:
-                s = clean(df["Close"].dropna())
-                if s is not None and len(s) >= 50:
-                    return s
-        except: pass
-        try:
-            df = yf.download(tk, period="max", interval="1d",
-                             auto_adjust=True, progress=False, repair=False)
-            if df is not None and not df.empty:
-                c = df["Close"].iloc[:,0] if isinstance(df.columns, pd.MultiIndex) else df["Close"]
-                s = clean(c.dropna())
-                if s is not None and len(s) >= 50:
-                    return s
-        except: pass
-
-    # FRED fallback for bond yields
-    fred = {
-        "GB10YT=RR":"IRLTLT01GBM156N",
-        "JP10YT=RR":"IRLTLT01JPM156N",
-        "DE10YT=RR":"IRLTLT01DEM156N",
-        "FR10YT=RR":"IRLTLT01FRM156N",
-    }
-    if ticker in fred:
-        try:
-            url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={fred[ticker]}"
-            r = requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+            url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+            r   = requests.get(url, timeout=25,
+                               headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             if r.ok and len(r.text) > 100:
                 df = pd.read_csv(StringIO(r.text))
-                df.columns = ["Date","Value"]
+                df.columns = ["Date", "Value"]
                 df["Date"]  = pd.to_datetime(df["Date"],  errors="coerce")
                 df["Value"] = pd.to_numeric(df["Value"],  errors="coerce")
                 df = df.dropna().set_index("Date").sort_index()
                 if not df.empty:
                     idx = pd.date_range(df.index[0], pd.Timestamp.now(), freq="D")
                     s   = df["Value"].reindex(idx).interpolate("linear").dropna()
-                    s   = clean(s)
+                    return clean(s)
+        except:
+            pass
+        return None
+
+    # ── Yahoo Finance — all other tickers ────────────────────────────────────
+    for method in ["ticker", "download"]:
+        try:
+            if method == "ticker":
+                df = yf.Ticker(ticker).history(period="max", auto_adjust=True)
+                if df is not None and not df.empty and "Close" in df.columns:
+                    s = clean(df["Close"].dropna())
                     if s is not None and len(s) >= 50:
                         return s
-        except: pass
+            else:
+                df = yf.download(ticker, period="max", interval="1d",
+                                 auto_adjust=True, progress=False, repair=False)
+                if df is not None and not df.empty:
+                    c = df["Close"].iloc[:,0] if isinstance(df.columns, pd.MultiIndex) else df["Close"]
+                    s = clean(c.dropna())
+                    if s is not None and len(s) >= 50:
+                        return s
+        except:
+            pass
 
     return None
+
 
 def get_series(ticker: str, tf: str) -> Optional[pd.Series]:
     rule  = TF[tf]
