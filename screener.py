@@ -95,7 +95,7 @@ PAIRS = [
     ("USDCHF",            "DX=F",     "6S=F",        "FX"),
     ("USDJPY",            "DX=F",     "6J=F",        "FX"),
     ("USDMXN",            "DX=F",     "6M=F",        "FX"),
-    ("USDZAR",            "DX=F",     "USDZAR=X",    "FX"),
+    ("USDZAR",            "DX=F",     "6Z=F",        "FX"),
     # Commodities vs Gold
     ("GOLD / DX",         "GC=F",     "DX=F",        "Commodities"),
     ("OIL / GOLD",        "CL=F",     "GC=F",        "Commodities"),
