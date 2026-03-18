@@ -120,11 +120,12 @@ PAIRS = [
     ("NQ / BONDS",        "NQ=F",     "ZB=F",        "Indices vs Bonds"),
     ("RUSSELL / BONDS",   "RTY=F",    "ZB=F",        "Indices vs Bonds"),
     ("DOW / BONDS",       "YM=F",     "ZB=F",        "Indices vs Bonds"),
-    # EU + Japan: index from Yahoo Finance, yield from bond: prefix
+    # EU + Japan: index from Yahoo Finance, yield tickers direct from Yahoo Finance
+    # Multiple yield tickers tried via _yf_fetch fallback logic
     ("CAC40 / FR10Y",     "^FCHI",    "bond:FR",     "Indices vs Bonds"),
     ("DAX / DE10Y",       "^GDAXI",   "bond:DE",     "Indices vs Bonds"),
-    ("FTSE / UK10Y",      "^FTSE",    "bond:GB",     "Indices vs Bonds"),
-    ("NIKKEI / JP10Y",    "^N225",    "bond:JP",     "Indices vs Bonds"),
+    ("FTSE / UK10Y",      "^FTSE",    "^TNGB",       "Indices vs Bonds"),
+    ("NIKKEI / JP10Y",    "^N225",    "^TNJP",       "Indices vs Bonds"),
 ]
 
 GROUPS    = ["All"] + sorted(set(p[3] for p in PAIRS))
@@ -192,37 +193,55 @@ def _clean(s: Optional[pd.Series]) -> Optional[pd.Series]:
 def _yf_fetch(ticker: str) -> Optional[pd.Series]:
     """
     Fetch max daily history from Yahoo Finance.
-    Tries yf.Ticker().history() first (handles =RR yield tickers better),
-    then falls back to yf.download().
+    For yield tickers (^TNGB, ^TNJP) tries multiple known-working symbols.
     """
-    # Method 1: Ticker.history — better for non-standard tickers
-    try:
-        tk  = yf.Ticker(ticker)
-        df  = tk.history(period="max", auto_adjust=True)
-        if df is not None and not df.empty and "Close" in df.columns:
-            s = _clean(df["Close"].dropna())
-            if s is not None and len(s) >= 20:
-                _log("ok", f"  yf.Ticker OK  {ticker}  ({len(s)} bars)")
-                return s
-    except Exception as e:
-        _log("warn", f"  yf.Ticker fail {ticker}: {e}")
+    # Fallback ticker map — if primary fails, try these alternatives in order
+    FALLBACKS = {
+        "^TNGB": ["^TNGB", "GB10YT=RR", "GBGV10YT=RR", "GBAT10Y=RR"],
+        "^TNJP": ["^TNJP", "JP10YT=RR", "JPGV10YT=RR", "JPAT10Y=RR"],
+    }
+    candidates = FALLBACKS.get(ticker, [ticker])
 
-    # Method 2: yf.download — standard bulk fetch
-    try:
-        df = yf.download(
-            ticker, period="max", interval="1d",
-            auto_adjust=True, progress=False, repair=False,
-        )
-        if df is not None and not df.empty:
-            c = df["Close"].iloc[:, 0] if isinstance(df.columns, pd.MultiIndex) else df["Close"]
-            s = _clean(c.dropna())
-            if s is not None and len(s) >= 20:
-                _log("ok", f"  yf.download OK {ticker}  ({len(s)} bars)")
-                return s
-    except Exception as e:
-        _log("warn", f"  yf.download fail {ticker}: {e}")
+    for tk in candidates:
+        # Method 1: Ticker.history
+        try:
+            df = yf.Ticker(tk).history(period="max", auto_adjust=True)
+            if df is not None and not df.empty and "Close" in df.columns:
+                s = _clean(df["Close"].dropna())
+                if s is not None and len(s) >= 20:
+                    _log("ok", f"  yf.Ticker OK  {tk}  ({len(s)} bars)")
+                    return s
+        except Exception as e:
+            _log("warn", f"  yf.Ticker fail {tk}: {e}")
 
-    _log("fail", f"  yf FAILED for {ticker}")
+        # Method 2: yf.download
+        try:
+            df = yf.download(tk, period="max", interval="1d",
+                             auto_adjust=True, progress=False, repair=False)
+            if df is not None and not df.empty:
+                c = df["Close"].iloc[:, 0] if isinstance(df.columns, pd.MultiIndex) else df["Close"]
+                s = _clean(c.dropna())
+                if s is not None and len(s) >= 20:
+                    _log("ok", f"  yf.download OK {tk}  ({len(s)} bars)")
+                    return s
+        except Exception as e:
+            _log("warn", f"  yf.download fail {tk}: {e}")
+
+        _log("fail", f"  yf FAILED for {tk}")
+
+    # For ^TNGB and ^TNJP: FRED as final guaranteed fallback
+    fred_map = {
+        "^TNGB": "IRLTLT01GBM156N",
+        "^TNJP": "IRLTLT01JPM156N",
+    }
+    if ticker in fred_map:
+        _log("info", f"  Trying FRED fallback for {ticker}")
+        s = _fred_fresh(fred_map[ticker])
+        if s is not None:
+            _log("ok", f"  FRED fallback OK for {ticker}")
+            return s
+
+    _log("fail", f"  ALL methods FAILED for {ticker}")
     return None
 
 
