@@ -12,6 +12,7 @@ import numpy as np
 import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 from datetime import datetime
 from typing import Optional
@@ -329,9 +330,16 @@ def main():
     all_tickers = list(set(t for _,f,b,_ in PAIRS for t in [f,b]))
     with st.spinner("Fetching data…"):
         bar = st.progress(0)
-        for i,tk in enumerate(all_tickers):
-            fetch(tk)
-            bar.progress((i+1)/len(all_tickers))
+        completed = 0
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            futures = {executor.submit(fetch, tk): tk for tk in all_tickers}
+            for future in as_completed(futures):
+                completed += 1
+                bar.progress(completed / len(all_tickers))
+                try:
+                    future.result()
+                except Exception:
+                    pass
         bar.empty()
 
     # Compute scores
