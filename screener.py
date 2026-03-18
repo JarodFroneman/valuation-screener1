@@ -100,29 +100,44 @@ def clean(s: pd.Series) -> Optional[pd.Series]:
         return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_fred_cached(series_id: str) -> pd.Series:
+    """
+    Fetch FRED series. RAISES exception on any failure.
+    st.cache_data never caches exceptions — so a timeout or network error
+    forces a retry on the next call instead of caching None for an hour.
+    """
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    r   = requests.get(url, timeout=15,
+                       headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    if not r.ok:
+        raise ConnectionError(f"FRED HTTP {r.status_code} for {series_id}")
+    if len(r.text) < 50:
+        raise ValueError(f"FRED empty response for {series_id}")
+    df = pd.read_csv(StringIO(r.text))
+    df.columns = ["Date", "Value"]
+    df["Date"]  = pd.to_datetime(df["Date"],  errors="coerce")
+    df["Value"] = pd.to_numeric(df["Value"],  errors="coerce")
+    df = df.dropna().set_index("Date").sort_index()
+    if df.empty:
+        raise ValueError(f"FRED no valid rows for {series_id}")
+    idx = pd.date_range(df.index[0], pd.Timestamp.now(), freq="D")
+    s   = df["Value"].reindex(idx).interpolate("linear").dropna()
+    s   = clean(s)
+    if s is None or len(s) < 50:
+        raise ValueError(f"FRED insufficient data for {series_id}: {len(s) if s is not None else 0} rows")
+    return s
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch(ticker: str) -> Optional[pd.Series]:
     """Fetch daily price/yield series. FRED: prefix goes straight to FRED."""
 
-    # ── FRED: prefix — skip Yahoo entirely, go straight to FRED ──────────────
+    # ── FRED: prefix ──────────────────────────────────────────────────────────
     if ticker.startswith("FRED:"):
-        series_id = ticker[5:]
         try:
-            url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-            r   = requests.get(url, timeout=25,
-                               headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            if r.ok and len(r.text) > 100:
-                df = pd.read_csv(StringIO(r.text))
-                df.columns = ["Date", "Value"]
-                df["Date"]  = pd.to_datetime(df["Date"],  errors="coerce")
-                df["Value"] = pd.to_numeric(df["Value"],  errors="coerce")
-                df = df.dropna().set_index("Date").sort_index()
-                if not df.empty:
-                    idx = pd.date_range(df.index[0], pd.Timestamp.now(), freq="D")
-                    s   = df["Value"].reindex(idx).interpolate("linear").dropna()
-                    return clean(s)
-        except:
-            pass
-        return None
+            return _fetch_fred_cached(ticker[5:])
+        except Exception:
+            return None
 
     # ── Yahoo Finance — all other tickers ────────────────────────────────────
     for method in ["ticker", "download"]:
